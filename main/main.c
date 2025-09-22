@@ -1,11 +1,383 @@
 #include <stdio.h>
-#include <stdbool.h>
-#include <unistd.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/mcpwm_prelude.h"
+#include "esp_log.h"
+
+// Configuration parameters
+#define PWM_FREQUENCY_HZ    10000   // 10 kHz
+#define PWM_GPIO_A          21       // First PWM output
+#define PWM_GPIO_B          12       // Second PWM output
+#define PWM_DUTY_CYCLE      50       // 50% duty cycle for both signals
+#define PWM_RESOLUTION_HZ   80000000 // 80 MHz resolution for high precision
+
+static const char *TAG = "Analog-LIA Controller";
+static float current_phase_degrees = 0.0;
+static int32_t current_phase_ticks = 0;
+
+// Function prototypes
+esp_err_t set_phase_difference_degrees(float phase_degrees);
+esp_err_t set_phase_difference_ticks(int32_t ticks);
+void keyboard_monitor_task(void *pvParameters);
+esp_err_t mcpwm_initialize(void);
+
+// Task to monitor if a key is pressed
+void keyboard_monitor_task(void *pvParameters)
+{
+  static const char *KeyboardTAG = "Phase updater";
+  int c;
+  float desired_phase_degrees;
+  int32_t desired_phase_ticks;
+  while (1) {
+    c = getchar();
+    if (c != EOF && c != 0xFF) { // Check for a valid character
+      ESP_LOGI(KeyboardTAG, "Key pressed: '%c' (ASCII: %d)", c, c);
+      
+      // React to the character
+      switch (c) {
+      case 'w':
+	desired_phase_ticks = current_phase_ticks + 1;
+	ESP_LOGI(KeyboardTAG, "Increasing phase (fine)...");
+	set_phase_difference_ticks(desired_phase_ticks);
+	ESP_LOGI(KeyboardTAG, "Current phase: %.3f degrees (%ld ticks)",
+		 current_phase_degrees, current_phase_ticks);
+	break;
+      case 's':
+	desired_phase_ticks = current_phase_ticks - 1;
+	ESP_LOGI(KeyboardTAG, "Decreasing phase (fine)...");
+	set_phase_difference_ticks(desired_phase_ticks);
+	ESP_LOGI(KeyboardTAG, "Current phase: %.3f degrees (%ld ticks)",
+		 current_phase_degrees, current_phase_ticks);
+	break;
+      case 'd':
+      case 'D':
+	desired_phase_degrees = current_phase_degrees + 90.0;
+	ESP_LOGI(KeyboardTAG, "+90 degree phase...");
+	set_phase_difference_degrees(desired_phase_degrees);
+	ESP_LOGI(KeyboardTAG, "Current phase: %.3f degrees (%ld ticks)",
+		 current_phase_degrees, current_phase_ticks);
+        break;
+      case 'a':
+      case 'A':
+	desired_phase_degrees = current_phase_degrees - 90.0;
+	ESP_LOGI(KeyboardTAG, "-90 degree phase...");
+	set_phase_difference_degrees(desired_phase_degrees);
+	ESP_LOGI(KeyboardTAG, "Current phase: %.3f degrees (%ld ticks)",
+		 current_phase_degrees, current_phase_ticks);
+        break;
+      case 'W':
+	desired_phase_ticks = current_phase_ticks + 100;
+	ESP_LOGI(KeyboardTAG, "Increasing phase (coarse)...");
+	set_phase_difference_ticks(desired_phase_ticks);
+	ESP_LOGI(KeyboardTAG, "Current phase: %.3f degrees (%ld ticks)",
+		 current_phase_degrees, current_phase_ticks);
+	break;
+      case 'S':
+	desired_phase_ticks = current_phase_ticks - 100;
+	ESP_LOGI(KeyboardTAG, "Decreasing phase (coarse)...");
+	set_phase_difference_ticks(desired_phase_ticks);
+	ESP_LOGI(KeyboardTAG, "Current phase: %.3f degrees (%ld ticks)",
+		 current_phase_degrees, current_phase_ticks);
+	break;
+	/*case 'q':
+	ESP_LOGI(TAG, "Exiting monitor task...");
+	// Delete the task if needed
+	vTaskDelete(NULL);
+	break;*/
+      default:
+	ESP_LOGI(KeyboardTAG, "Unknown command.");
+	break;
+      }
+    }
+    // Add a small delay to yield CPU time to other tasks
+    vTaskDelay(pdMS_TO_TICKS(10)); // Adjust delay as needed
+  }
+}
+
+// MCPWM handles - using separate timers for true independence
+mcpwm_timer_handle_t timer_a_handle = NULL;
+mcpwm_timer_handle_t timer_b_handle = NULL;
+mcpwm_oper_handle_t operator_a_handle = NULL;
+mcpwm_oper_handle_t operator_b_handle = NULL;
+mcpwm_cmpr_handle_t comparator_a_handle = NULL;
+mcpwm_cmpr_handle_t comparator_b_handle = NULL;
+mcpwm_gen_handle_t generator_a_handle = NULL;
+mcpwm_gen_handle_t generator_b_handle = NULL;
+mcpwm_sync_handle_t sync_handle = NULL;   // Global sync handle (created once)
+
+// Timer period for phase calculations
+uint32_t timer_period_ticks = 0;
+
+esp_err_t mcpwm_initialize(void)
+{
+  esp_err_t ret = ESP_OK;
+  
+  // Calculate the period in ticks
+  timer_period_ticks = PWM_RESOLUTION_HZ / PWM_FREQUENCY_HZ;
+  
+  // Create two independent MCPWM timers
+  mcpwm_timer_config_t timer_config = {
+    .group_id = 0,
+    .clk_src = MCPWM_TIMER_CLK_SRC_DEFAULT,
+    .resolution_hz = PWM_RESOLUTION_HZ,
+    .count_mode = MCPWM_TIMER_COUNT_MODE_UP,
+    .period_ticks = timer_period_ticks,
+  };
+  
+  // Create timer A
+  ret = mcpwm_new_timer(&timer_config, &timer_a_handle);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to create MCPWM timer A: %s", esp_err_to_name(ret));
+    return ret;
+  }
+  
+  // Create timer B (independent)
+  ret = mcpwm_new_timer(&timer_config, &timer_b_handle);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to create MCPWM timer B: %s", esp_err_to_name(ret));
+    return ret;
+  }
+  
+  ESP_LOGI(TAG, "Timers created - Frequency: %d Hz, Period: %lu ticks", 
+	   PWM_FREQUENCY_HZ, timer_period_ticks);
+  
+  // Create MCPWM operators
+  mcpwm_operator_config_t operator_config = {
+    .group_id = 0,
+  };
+  
+  ret = mcpwm_new_operator(&operator_config, &operator_a_handle);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to create operator A: %s", esp_err_to_name(ret));
+    return ret;
+  }
+  
+  ret = mcpwm_new_operator(&operator_config, &operator_b_handle);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to create operator B: %s", esp_err_to_name(ret));
+    return ret;
+  }
+  
+  // Connect each operator to its own timer
+  ret = mcpwm_operator_connect_timer(operator_a_handle, timer_a_handle);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to connect timer A to operator A: %s", esp_err_to_name(ret));
+    return ret;
+  }
+  
+  ret = mcpwm_operator_connect_timer(operator_b_handle, timer_b_handle);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to connect timer B to operator B: %s", esp_err_to_name(ret));
+    return ret;
+  }
+  
+  // Create comparators
+  mcpwm_comparator_config_t comparator_config = {
+    .flags.update_cmp_on_tez = true,
+  };
+  
+  ret = mcpwm_new_comparator(operator_a_handle, &comparator_config, &comparator_a_handle);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to create comparator A: %s", esp_err_to_name(ret));
+    return ret;
+  }
+  
+  ret = mcpwm_new_comparator(operator_b_handle, &comparator_config, &comparator_b_handle);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to create comparator B: %s", esp_err_to_name(ret));
+    return ret;
+  }
+  
+  // Create generators
+  mcpwm_generator_config_t generator_config = {
+    .gen_gpio_num = PWM_GPIO_A,
+  };
+  
+  ret = mcpwm_new_generator(operator_a_handle, &generator_config, &generator_a_handle);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to create generator A: %s", esp_err_to_name(ret));
+    return ret;
+  }
+  
+  generator_config.gen_gpio_num = PWM_GPIO_B;
+  ret = mcpwm_new_generator(operator_b_handle, &generator_config, &generator_b_handle);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to create generator B: %s", esp_err_to_name(ret));
+    return ret;
+  }
+  
+  // Set duty cycle for both comparators (exactly 50%)
+  uint32_t duty_ticks = timer_period_ticks / 2;  // 50% duty cycle
+  
+  ret = mcpwm_comparator_set_compare_value(comparator_a_handle, duty_ticks);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to set comparator A value: %s", esp_err_to_name(ret));
+    return ret;
+  }
+  
+  ret = mcpwm_comparator_set_compare_value(comparator_b_handle, duty_ticks);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to set comparator B value: %s", esp_err_to_name(ret));
+    return ret;
+  }
+  
+  ESP_LOGI(TAG, "Duty cycle set to %lu ticks (exactly 50%%)", duty_ticks);
+  
+  // Configure PWM A actions (reference signal)
+  ret = mcpwm_generator_set_action_on_timer_event(generator_a_handle,
+						  MCPWM_GEN_TIMER_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, MCPWM_TIMER_EVENT_EMPTY, MCPWM_GEN_ACTION_HIGH));
+  if (ret != ESP_OK) return ret;
+  
+  ret = mcpwm_generator_set_action_on_compare_event(generator_a_handle,
+						    MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, comparator_a_handle, MCPWM_GEN_ACTION_LOW));
+  if (ret != ESP_OK) return ret;
+  
+  // Configure PWM B actions (same pattern as A)
+  ret = mcpwm_generator_set_action_on_timer_event(generator_b_handle,
+						  MCPWM_GEN_TIMER_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, MCPWM_TIMER_EVENT_EMPTY, MCPWM_GEN_ACTION_HIGH));
+  if (ret != ESP_OK) return ret;
+  
+  ret = mcpwm_generator_set_action_on_compare_event(generator_b_handle,
+						    MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, comparator_b_handle, MCPWM_GEN_ACTION_LOW));
+  if (ret != ESP_OK) return ret;
+  
+  // Enable both timers
+  ret = mcpwm_timer_enable(timer_a_handle);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to enable timer A: %s", esp_err_to_name(ret));
+    return ret;
+  }
+  
+  ret = mcpwm_timer_enable(timer_b_handle);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to enable timer B: %s", esp_err_to_name(ret));
+    return ret;
+  }
+  
+  // Create sync source ONCE here: use timer A EMPTY event
+  mcpwm_timer_sync_src_config_t sync_config = {
+    .timer_event = MCPWM_TIMER_EVENT_EMPTY,
+    .flags.propagate_input_sync = false,
+  };
+  ret = mcpwm_new_timer_sync_src(timer_a_handle, &sync_config, &sync_handle);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to create sync source: %s", esp_err_to_name(ret));
+    return ret;
+  }
+  
+  // Start both timers
+  ret = mcpwm_timer_start_stop(timer_a_handle, MCPWM_TIMER_START_NO_STOP);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to start timer A: %s", esp_err_to_name(ret));
+    return ret;
+  }
+  
+  ret = mcpwm_timer_start_stop(timer_b_handle, MCPWM_TIMER_START_NO_STOP);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to start timer B: %s", esp_err_to_name(ret));
+    return ret;
+  }
+  
+  ESP_LOGI(TAG, "MCPWM initialized successfully - Both independent timers running");
+  return ESP_OK;
+}
+
+esp_err_t set_phase_difference_ticks(int32_t ticks)
+{
+  // Ensure phase is within range
+  while (ticks < 0) ticks += timer_period_ticks;
+  while (ticks >= timer_period_ticks) ticks -= timer_period_ticks;
+  
+  // Calculate phase offset in timer ticks
+  uint32_t phase_offset_ticks = (uint32_t)ticks;
+  uint32_t count_at_sync = phase_offset_ticks;
+  
+  // Program the phase update to take effect on the NEXT A EMPTY event.
+  // This is jitter-free and supported in ESP-IDF v5.2 (no soft-trigger API).
+  mcpwm_timer_sync_phase_config_t phase_config = {
+    .sync_src = sync_handle,   // reuse global sync handle
+    .count_value = count_at_sync,
+    .direction = MCPWM_TIMER_DIRECTION_UP,
+  };
+  
+  esp_err_t ret = mcpwm_timer_set_phase_on_sync(timer_b_handle, &phase_config);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to set phase on timer B: %s", esp_err_to_name(ret));
+    return ret;
+  }
+
+  // Update was posible, so update the current phase
+  current_phase_ticks = ticks;
+
+  // Update phase in degrees as well
+  current_phase_degrees = (current_phase_ticks * 360.0) / timer_period_ticks;
+
+  ESP_LOGI(TAG, "New phase update accepted (%0.3f degrees, %ld ticks).", current_phase_degrees, current_phase_ticks);
+  
+  return ESP_OK;
+}
+
+esp_err_t set_phase_difference_degrees(float phase_degrees)
+{
+  // Ensure phase is within 0-360 range
+  while (phase_degrees < 0) phase_degrees += 360.0;
+  while (phase_degrees >= 360.0) phase_degrees -= 360.0;
+  
+  // Calculate phase offset in timer ticks
+  uint32_t phase_offset_ticks = (uint32_t)((phase_degrees / 360.0) * timer_period_ticks);
+  
+  uint32_t count_at_sync = phase_offset_ticks;
+  
+  // Program the phase update to take effect on the NEXT A EMPTY event.
+  // This is jitter-free and supported in ESP-IDF v5.2 (no soft-trigger API).
+  mcpwm_timer_sync_phase_config_t phase_config = {
+    .sync_src = sync_handle,   // reuse global sync handle
+    .count_value = count_at_sync,
+    .direction = MCPWM_TIMER_DIRECTION_UP,
+  };
+  
+  esp_err_t ret = mcpwm_timer_set_phase_on_sync(timer_b_handle, &phase_config);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to set phase on timer B: %s", esp_err_to_name(ret));
+    return ret;
+  }
+
+  // Update was posible, so update the current phase
+  current_phase_degrees = phase_degrees;
+
+  // Update phase in degrees as well
+  current_phase_ticks = phase_offset_ticks;
+
+  ESP_LOGI(TAG, "New phase update accepted (%0.3f degrees, %ld ticks).", current_phase_degrees, current_phase_ticks);
+  
+  return ESP_OK;
+}
 
 void app_main(void)
 {
-    while (true) {
-        printf("Hello from app_main!\n");
-        sleep(1);
-    }
+  // Create the keyboard monitor task
+  xTaskCreate(keyboard_monitor_task, "Keyboard Monitor Task", 2048, NULL, 5, NULL);
+  
+  ESP_LOGI(TAG, "Starting PWM Phase Control System");
+  
+  // Initialize MCPWM
+  esp_err_t ret = mcpwm_initialize();
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to initialize MCPWM: %s", esp_err_to_name(ret));
+    return;
+  }
+  
+  ESP_LOGI(TAG, "Both PWMs running at %d Hz, 50%% duty cycle", PWM_FREQUENCY_HZ);
+  ESP_LOGI(TAG, "Phase resolution: %.3f degrees per tick", 360.0 / timer_period_ticks);
+
+  // Init phase difference to zero!
+  int32_t desired_phase_ticks = 0;
+  set_phase_difference_degrees(desired_phase_ticks);
+  ESP_LOGI(TAG, "Current phase: %.3f degrees (%ld ticks)",
+	   current_phase_degrees, current_phase_ticks);
+  
+  // Main loop
+  while (1) {
+    vTaskDelay(pdMS_TO_TICKS(500));
+  }  
 }
