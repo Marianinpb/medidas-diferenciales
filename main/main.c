@@ -3,6 +3,14 @@
 #include "freertos/task.h"
 #include "driver/mcpwm_prelude.h"
 #include "esp_log.h"
+#include <stdint.h>
+#include "driver/gpio.h"
+#include "driver/spi_common.h"
+#include "soc/spi_struct.h"
+#include "soc/gpio_sig_map.h"
+#include "soc/gpio_struct.h"
+#include "freertos/FreeRTOS.h"
+#include "esp_task_wdt.h"
 
 // Configuration parameters
 #define PWM_FREQUENCY_HZ    10000   // 10 kHz
@@ -15,11 +23,160 @@ static const char *TAG = "Analog-LIA Controller";
 static float current_phase_degrees = 0.0;
 static int32_t current_phase_ticks = 0;
 
+// fast digital write
+#define GPIO_SET_HIGH(pin)   (GPIO.out_w1ts = (1 << pin))
+#define GPIO_SET_LOW(pin)    (GPIO.out_w1tc = (1 << pin))
+
+// SPI pins
+#define PIN_NUM_CLK   18
+#define PIN_NUM_MOSI  23  
+#define PIN_NUM_MISO  19
+#define PIN_NUM_CS     5
+
+// buffer size
+#define SAMPLES_PER_BATCH 32  // Number of ADC samples to collect before processing
+#define FILTER_LENGTH 8  // Size of moving average length
+
+// Number of outputs
+#define NUM_OUTPUTS 5
+
+// 12 bit mask for 32-bit integers
+#define MASK_A 0xFFFFF000
+#define MASK_B 0x00000FFF
+
+// prototype functions
+void init_buffers(void);
+void init_spi_adc(BaseType_t coreID);
+void spi_sampling_task(void *param);
+void app_main(void);
+
+// Global buffers
+static int32_t ring_buffer[NUM_OUTPUTS][FILTER_LENGTH]; // moving average
+static int32_t filter_out[NUM_OUTPUTS];
+static int32_t pesos[FILTER_LENGTH];
+
 // Function prototypes
 esp_err_t set_phase_difference_degrees(float phase_degrees);
 esp_err_t set_phase_difference_ticks(int32_t ticks);
 void keyboard_monitor_task(void *pvParameters);
 esp_err_t mcpwm_initialize(void);
+
+// Initalization of ADC and filter buffers
+void init_buffers(void){
+  for(size_t o=0; o<NUM_OUTPUTS; o++){
+    for(size_t i=0; i<FILTER_LENGTH; i++)
+      ring_buffer[o][i] = 0;
+    filter_out[o] = 0;
+  }
+}
+
+void init_spi_adc(BaseType_t coreID){
+
+  // Initialize SPI bus
+  spi_bus_config_t bus_cfg = {
+    .mosi_io_num = PIN_NUM_MOSI,
+    .miso_io_num = PIN_NUM_MISO,
+    .sclk_io_num = PIN_NUM_CLK,
+    .quadwp_io_num = -1,
+    .quadhd_io_num = -1,
+  };
+  spi_bus_initialize(SPI3_HOST, &bus_cfg, SPI_DMA_DISABLED);
+  
+  // Configure CS pin manually
+  gpio_set_direction(PIN_NUM_CS, GPIO_MODE_OUTPUT);
+  gpio_set_level(PIN_NUM_CS, 0);
+
+  // Clear all SPI3 data buffers
+  for (int i = 0; i < 16; i++) {
+    SPI3.data_buf[i] = 0;
+  }
+  
+  // Clock base 80MHz
+  // Actual clk speed: 80MHz / clk_div;
+  int clk_div = 8; // 8 for 10 MHz, 10 for 8 MHz
+  SPI3.clock.clk_equ_sysclk = 0;
+  SPI3.clock.clkdiv_pre = 0;
+  SPI3.clock.clkcnt_n = clk_div-1; // n+1 = 10, so 80MHz/10 = 8MHz
+  SPI3.clock.clkcnt_h = clk_div/2 - 1; // (n+1)/2 - 1 for ~50% duty cycle
+  SPI3.clock.clkcnt_l = clk_div-1;
+
+  // *** SPI MODE 1 CONFIGURATION (CPOL=0, CPHA=1) ***
+  SPI3.pin.ck_idle_edge = 0;    // CPOL=0: Clock idles LOW
+  SPI3.user.ck_out_edge = 0;    // CPHA=1: Master changes data on rising edge,
+                                //         samples MISO on falling edge
+                                // Note: ck_out_edge controls MASTER timing, not just MOSI
+  
+  // No command at the begining
+  SPI3.user.usr_command = 0; // otherwise is sends an initial 8-bit sequence (the SPI command)
+  
+  // Set as 16-bit transfers
+  uint32_t bitLength = 16;
+  SPI3.mosi_dlen.usr_mosi_dbitlen = bitLength - 1; // mosi length
+  SPI3.miso_dlen.usr_miso_dbitlen = bitLength - 1; // miso length
+  
+  // Full-duplex or half-duplex (1:enable 0:disable)
+  SPI3.user.usr_miso = 1; // miso
+  SPI3.user.usr_mosi = 1; // mosi
+  SPI3.user.doutdin = 1;  // full duplex
+  
+  // Create SPI sampling task pinned to CoreID
+  xTaskCreatePinnedToCore(
+        spi_sampling_task,      // Task function
+        "spi_sampling",         // Task name
+        4096,                   // Stack size (bytes)
+        NULL,//tx_buffer,              // Parameter (TX buffer)
+        tskIDLE_PRIORITY + 2,   // High priority (use tskIDLE_PRIORITY instead of configMAX_PRIORITIES)
+        NULL,                   // Task handle (optional)
+        coreID                  // Core ID (0 = Core0, 1 = Core1)
+        );
+}
+
+// SPI sampling task
+// Should run on Core 1 (dedicated to SPI sampling)
+// Note: Input parameter is not used
+void spi_sampling_task(void *param){
+  size_t index = 0;
+  while (1) {
+    for(int o = 0; o < NUM_OUTPUTS; o++){
+      // === ADC ACCUMULATION PHASE ===
+      int32_t acc = 0; // accumulator
+      for (int i = 0; i < SAMPLES_PER_BATCH; i++) {
+        
+        // Fast CS pulse (~60 ns)
+        GPIO_SET_HIGH(PIN_NUM_CS);
+        GPIO_SET_LOW(PIN_NUM_CS);
+        
+        // Load TX data (for monitoring)
+        SPI3.data_buf[0] = 0xAAAA;
+        
+        // Start SPI transaction and wait for completion
+        SPI3.cmd.usr = 1;
+        while (SPI3.cmd.usr);
+        
+        // Get RX data and extract value
+        uint32_t word = SPI3.data_buf[0];
+        word = word >> 2; // Select the right number of bits to drop here!
+        
+        // sign extension
+        if( (word >> 11)&1 ) word |= MASK_A;
+        else word &= MASK_B;
+        
+        // accumulate
+        acc += (int32_t)word;
+      }
+      
+      // === FILTERING PHASE ===
+      filter_out[o] = 0;
+      for(int i=0; i<FILTER_LENGTH; i++){
+	filter_out[o] += ring_buffer[o][i]*pesos[i];
+      }
+      //filter_out[o] -= ring_buffer[o][index];
+      //filter_out[o] += acc;
+      ring_buffer[o][index] = acc;
+     }
+    index = (index+1) % FILTER_LENGTH;
+  }
+}
 
 // Task to monitor if a key is pressed
 void keyboard_monitor_task(void *pvParameters)
