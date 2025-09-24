@@ -510,31 +510,30 @@ esp_err_t set_phase_difference_degrees(float phase_degrees)
   return ESP_OK;
 }
 
+void print_filtered_task(void *param){
+    while(1){
+        for(int o = 0; o < NUM_OUTPUTS; o++)
+            printf("%ld ", filter_out[o]);
+        printf("\n");
+        vTaskDelay(pdMS_TO_TICKS(1000)); // Espera 1 segundo
+    }
+}
+
 void app_main(void)
 {
-  // Create the keyboard monitor task
-  xTaskCreate(keyboard_monitor_task, "Keyboard Monitor Task", 2048, NULL, 5, NULL);
-  
-  ESP_LOGI(TAG, "Starting PWM Phase Control System");
-  
-  // Initialize MCPWM
-  esp_err_t ret = mcpwm_initialize();
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to initialize MCPWM: %s", esp_err_to_name(ret));
-    return;
-  }
-  
-  ESP_LOGI(TAG, "Both PWMs running at %d Hz, 50%% duty cycle", PWM_FREQUENCY_HZ);
-  ESP_LOGI(TAG, "Phase resolution: %.3f degrees per tick", 360.0 / timer_period_ticks);
+    init_buffers();                   // Inicializa buffers del filtro y ADC
+    init_spi_adc(1);                  // Sampling SPI en Core 1
+    esp_err_t ret = mcpwm_initialize();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize MCPWM: %s", esp_err_to_name(ret));
+        return;
+    }
+    set_phase_difference_degrees(0);  // Fase inicial en 0 (se puede ajustar después)
+    xTaskCreate(keyboard_monitor_task, "Keyboard Monitor Task", 2048, NULL, 5, NULL); // Tarea teclado en Core 0
+    xTaskCreate(print_filtered_task, "Print Filtered Task", 2048, NULL, 4, NULL);     // Nueva tarea impresión
 
-  // Init phase difference to zero!
-  int32_t desired_phase_ticks = 0;
-  set_phase_difference_degrees(desired_phase_ticks);
-  ESP_LOGI(TAG, "Current phase: %.3f degrees (%ld ticks)",
-	   current_phase_degrees, current_phase_ticks);
-  
-  // Main loop
-  while (1) {
-    vTaskDelay(pdMS_TO_TICKS(500));
-  }  
+    // Bucle vacío principal: las tareas manejan todo por separado
+    while(1){
+        vTaskDelay(pdMS_TO_TICKS(10000)); // Espera larga para evitar que termine
+    }
 }
