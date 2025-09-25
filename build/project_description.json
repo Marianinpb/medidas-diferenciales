@@ -1,7 +1,7 @@
 {
     "version":            "1.2",
     "project_name":       "app-template",
-    "project_version":    "1",
+    "project_version":    "8d1b480-dirty",
     "project_path":       "C:/Users/mtico/workspace/Control_medidas_diferenciales",
     "idf_path":           "C:/Espressif/frameworks/esp-idf-v5.5",
     "build_dir":          "C:/Users/mtico/workspace/Control_medidas_diferenciales/build",
@@ -11,7 +11,7 @@
     "app_elf":            "app-template.elf",
     "app_bin":            "app-template.bin",
     "build_type":         "flash_app",
-    "git_revision":       "GIT-NOTFOUND",
+    "git_revision":       "v5.5",
     "target":             "esp32",
     "rev":                "0",
     "min_rev":            "0",

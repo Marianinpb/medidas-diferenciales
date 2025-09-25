@@ -515,7 +515,7 @@ void print_filtered_task(void *param){
         for(int o = 0; o < NUM_OUTPUTS; o++)
             printf("%ld ", filter_out[o]);
         printf("\n");
-        vTaskDelay(pdMS_TO_TICKS(1000)); // Espera 1 segundo
+        vTaskDelay(pdMS_TO_TICKS(1000)); // Espera
     }
 }
 
@@ -523,13 +523,15 @@ void app_main(void)
 {
     init_buffers();                   // Inicializa buffers del filtro y ADC
     init_spi_adc(1);                  // Sampling SPI en Core 1
+
+    xTaskCreate(keyboard_monitor_task, "Keyboard Monitor Task", 2048, NULL, 5, NULL); // Tarea teclado en Core 0
     esp_err_t ret = mcpwm_initialize();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize MCPWM: %s", esp_err_to_name(ret));
         return;
     }
     set_phase_difference_degrees(0);  // Fase inicial en 0 (se puede ajustar después)
-    xTaskCreate(keyboard_monitor_task, "Keyboard Monitor Task", 2048, NULL, 5, NULL); // Tarea teclado en Core 0
+    
     xTaskCreate(print_filtered_task, "Print Filtered Task", 2048, NULL, 4, NULL);     // Nueva tarea impresión
 
     // Bucle vacío principal: las tareas manejan todo por separado
