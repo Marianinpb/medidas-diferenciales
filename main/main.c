@@ -38,7 +38,7 @@ static int32_t current_phase_ticks = 0;
 #define FILTER_LENGTH 8  // Size of moving average length
 
 // Number of outputs
-#define NUM_OUTPUTS 5
+#define NUM_OUTPUTS 1
 
 // 12 bit mask for 32-bit integers
 #define MASK_A 0xFFFFF000
@@ -148,6 +148,11 @@ void spi_sampling_task(void *param){
         
         // Load TX data (for monitoring)
         SPI3.data_buf[0] = 0xAAAA;
+
+		// Clear all SPI3 data buffers
+  		//for (int i = 0; i < 16; i++) {
+    		//SPI3.data_buf[i] = 0;
+ 		 //}
         
         // Start SPI transaction and wait for completion
         SPI3.cmd.usr = 1;
@@ -155,6 +160,10 @@ void spi_sampling_task(void *param){
         
         // Get RX data and extract value
         uint32_t word = SPI3.data_buf[0];
+        // swap de bytes (si es de 16 bits)
+        word = ((word & 0xFF) << 8) | ((word >> 8) & 0xFF);
+		printf("**%lu\n",word);
+		vTaskDelay(pdMS_TO_TICKS(10000));
         word = word >> 2; // Select the right number of bits to drop here!
         
         // sign extension
@@ -188,53 +197,53 @@ void keyboard_monitor_task(void *pvParameters)
   while (1) {
     c = getchar();
     if (c != EOF && c != 0xFF) { // Check for a valid character
-      ESP_LOGI(KeyboardTAG, "Key pressed: '%c' (ASCII: %d)", c, c);
+      //ESP_LOGI(KeyboardTAG, "Key pressed: '%c' (ASCII: %d)", c, c);
       
       // React to the character
       switch (c) {
       case 'w':
 	desired_phase_ticks = current_phase_ticks + 1;
-	ESP_LOGI(KeyboardTAG, "Increasing phase (fine)...");
+	//ESP_LOGI(KeyboardTAG, "Increasing phase (fine)...");
 	set_phase_difference_ticks(desired_phase_ticks);
-	ESP_LOGI(KeyboardTAG, "Current phase: %.3f degrees (%ld ticks)",
-		 current_phase_degrees, current_phase_ticks);
+	//ESP_LOGI(KeyboardTAG, "Current phase: %.3f degrees (%ld ticks)",
+		 //current_phase_degrees, current_phase_ticks);
 	break;
       case 's':
 	desired_phase_ticks = current_phase_ticks - 1;
-	ESP_LOGI(KeyboardTAG, "Decreasing phase (fine)...");
+	//ESP_LOGI(KeyboardTAG, "Decreasing phase (fine)...");
 	set_phase_difference_ticks(desired_phase_ticks);
-	ESP_LOGI(KeyboardTAG, "Current phase: %.3f degrees (%ld ticks)",
-		 current_phase_degrees, current_phase_ticks);
+	//ESP_LOGI(KeyboardTAG, "Current phase: %.3f degrees (%ld ticks)",
+		 //current_phase_degrees, current_phase_ticks);
 	break;
       case 'd':
       case 'D':
 	desired_phase_degrees = current_phase_degrees + 90.0;
-	ESP_LOGI(KeyboardTAG, "+90 degree phase...");
+	//ESP_LOGI(KeyboardTAG, "+90 degree phase...");
 	set_phase_difference_degrees(desired_phase_degrees);
-	ESP_LOGI(KeyboardTAG, "Current phase: %.3f degrees (%ld ticks)",
-		 current_phase_degrees, current_phase_ticks);
+	//ESP_LOGI(KeyboardTAG, "Current phase: %.3f degrees (%ld ticks)",
+		 //current_phase_degrees, current_phase_ticks);
         break;
       case 'a':
       case 'A':
 	desired_phase_degrees = current_phase_degrees - 90.0;
-	ESP_LOGI(KeyboardTAG, "-90 degree phase...");
+	//ESP_LOGI(KeyboardTAG, "-90 degree phase...");
 	set_phase_difference_degrees(desired_phase_degrees);
-	ESP_LOGI(KeyboardTAG, "Current phase: %.3f degrees (%ld ticks)",
-		 current_phase_degrees, current_phase_ticks);
+	//ESP_LOGI(KeyboardTAG, "Current phase: %.3f degrees (%ld ticks)",
+		 //current_phase_degrees, current_phase_ticks);
         break;
       case 'W':
 	desired_phase_ticks = current_phase_ticks + 100;
-	ESP_LOGI(KeyboardTAG, "Increasing phase (coarse)...");
+	//ESP_LOGI(KeyboardTAG, "Increasing phase (coarse)...");
 	set_phase_difference_ticks(desired_phase_ticks);
-	ESP_LOGI(KeyboardTAG, "Current phase: %.3f degrees (%ld ticks)",
-		 current_phase_degrees, current_phase_ticks);
+	//ESP_LOGI(KeyboardTAG, "Current phase: %.3f degrees (%ld ticks)",
+		 //current_phase_degrees, current_phase_ticks);
 	break;
       case 'S':
 	desired_phase_ticks = current_phase_ticks - 100;
-	ESP_LOGI(KeyboardTAG, "Decreasing phase (coarse)...");
+	//ESP_LOGI(KeyboardTAG, "Decreasing phase (coarse)...");
 	set_phase_difference_ticks(desired_phase_ticks);
-	ESP_LOGI(KeyboardTAG, "Current phase: %.3f degrees (%ld ticks)",
-		 current_phase_degrees, current_phase_ticks);
+	//ESP_LOGI(KeyboardTAG, "Current phase: %.3f degrees (%ld ticks)",
+		 //current_phase_degrees, current_phase_ticks);
 	break;
 	/*case 'q':
 	ESP_LOGI(TAG, "Exiting monitor task...");
@@ -469,7 +478,7 @@ esp_err_t set_phase_difference_ticks(int32_t ticks)
   // Update phase in degrees as well
   current_phase_degrees = (current_phase_ticks * 360.0) / timer_period_ticks;
 
-  ESP_LOGI(TAG, "New phase update accepted (%0.3f degrees, %ld ticks).", current_phase_degrees, current_phase_ticks);
+  //ESP_LOGI(TAG, "New phase update accepted (%0.3f degrees, %ld ticks).", current_phase_degrees, current_phase_ticks);
   
   return ESP_OK;
 }
@@ -521,6 +530,11 @@ void print_filtered_task(void *param){
 
 void app_main(void)
 {
+
+    for (int i = 0; i < FILTER_LENGTH; i++) {
+    pesos[i] = 1;
+
+	}
     init_buffers();                   // Inicializa buffers del filtro y ADC
     init_spi_adc(1);                  // Sampling SPI en Core 1
 
