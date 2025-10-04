@@ -1,11 +1,10 @@
-ESP-IDF template app
-====================
+# Codigo de driver de sensor de perdidas por medidas diferenciales
 
-This is a template application to be used with [Espressif IoT Development Framework](https://github.com/espressif/esp-idf).
+Este proyecto desarrolla el código para ESP32S NodeMCU con el objetivo de implementar un driver avanzado para sensores de pérdidas mediante mediciones diferenciales. La solución incorpora soporte para múltiples canales multiplexados, procesamiento digital de señales a través de filtros, y comunicación eficiente mediante una interfaz de salida serial.
 
-Please check [ESP-IDF docs](https://docs.espressif.com/projects/esp-idf/en/latest/get-started/index.html) for getting started instructions.
+# 
 
-*Code in this repository is in the Public Domain (or CC0 licensed, at your option.)
-Unless required by applicable law or agreed to in writing, this
-software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-CONDITIONS OF ANY KIND, either express or implied.*
+# Diferential-measurements loss sensor driver code
+
+This project provides software for the ESP32S NodeMCU designed to implement an advanced sensor driver for loss detection using differential measurement techniques(link). The solution features support for multiple multiplexed channels, digital signal processing through filters, and efficient communication via a serial output interface.
+
